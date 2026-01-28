@@ -1,0 +1,1493 @@
+# 1 Kubernetesとは
+## 1.1 はじめに
+最近、いろんなところでコンテナやKubernetesというキーワードを聞くようになりました。ソフト開発の現場では当たり前になってるとか、インフラエンジニアの間でも、Kubernetes環境をメンテする仕事も出てきているようです。そういう環境で仕事をしているのですが、なかなか理解できないという話を聞いたのでちょっとまとめてみましたが、やってみて思うのは『やっぱ、こりゃ全然わからんわ。。。』ということです。なぜか？それはいろんな言葉がでてきますし、ClusterIPといわれたら我々のようなNWエンジニアあがりのものからするとユーザがアクセスしてくるVIPのことと思うのですが、全然用途が違ったりして、さらに全く想定外のところでvxlanの技術が利用されていたりして、ホントに何がなんだかわかりません。なので、NW基礎やサーバの基礎知識がないとダメだと思います。また、基礎がある前提でも大事な部分を抑えることが必要です。技術的な学習って、踏み込んではいけない（踏み込んでもあまり実質的な利益を得られない）ことが多々あります。例えば、無線の技術ならOFDMAの詳細とか。。VPNなら暗号化の詳細（AESと3DESの仕組みの違い）とか。。です。詳細まで知らなくても仕事はできますよね。このKubernetesやコンテナの技術にもvxlanの詳細な技術理解とかいらないと思います。ちょっと余談が長くなりましたが、私が理解しやすいと思った流れで説明をしていきます。
+1.2 コンテナとはなにか？
+コンテナはアプリケーションと、その実行に必要な環境を“ひとまとめ”にして動かす仕組みです。
+ 
+上記の図をみてください。コンテナと従来のHypervisor上に作られたGuestOSがあります。従来の開発者はHypervisor上のGuestOSをインストールし、必要なミドルウエアやライブラリーをインストールしてからアプリを構築しますが、作成した試験環境のアプリを本番環境にもっていくときには同様に、Hypervisor上に。。。とやるのですが、このときにバージョンの不整合などがあると試験環境では動いてたんだけど、本番環境では動かないということが起こるわけです。なので、開発環境でフルバックアップをとって本番環境に戻せばまず間違いはないのですが、大量のデータがあるので時間がかかる。
+　そこで、コンテナの登場です。コンテナを作成するには各エンジニアが手作業でOSやミドルをインストールするということをやりません。また、コンテナはVM上にOSをインストールするよりもはるかに小さなデータ量になるので、起動も早いです。
+コンテナは上記の図のように『アプリケーションと、その実行に必要な環境を“ひとまとめ”にして動かす仕組み』です。コンテナはOSカーネル上に作られた「プロセス用の軽量サンドボックス」という特徴もあります。VMのような仮想マシンのサンドボックスとは性質が違う、というのが重要ポイントです。「サンドボックス」というと一般的な意味は外の世界から隔離された、安全な実行環境ですが、これはVM上の仮想マシンにもコンテナにも当てはまりますがコンテナは隔離のレベルが違います。コンテナは隔離された “Linuxプロセス”です。普通の Linux プロセスなのですが、
+・見える世界が制限されている
+・使える資源が制限されている　Linuxプロセスです。
+どうやって実現しているのでそうか？Linux の機能そのもので実現しています。
+機能	役割
+namespace	見える世界を分ける
+cgroup	使える資源を制限
+capabilities	権限を削る
+seccomp	システムコール制限
+chroot / overlayfs	ファイル分離
+何が隔離されているのか？
+・コンテナ内では自分しか見えない
+・root/が違う
+・Podごとに小さなネットワーク空間　　→Podはコンテナの集合体です。
+・暴走しても使える量が制限されている。
+コンテナは便利な一方で技術的なハードルが高いという問題があります。その部分はこの講座で理解できるようにしてください。
+コンテナの代表的なイメージはnginxです。（エンジンエックス）と読みます。NginxはWEBサーバです。アプリ屋さんはここにJavaアプリなどを組み込んでアプリケーションを開発します。開発者は検証機で開発し、それを本番環境で実行する際は、nginx（例：nginx:1.24.0）を公式サイトからダウンロードし、自分が作成したアプリをその上にのせて動かします。
+また、コンテナと同義語のように使われているのがDockerです。（それは私だけ？）Dockerはコンテナを管理するソフトのことですのでDocker＝コンテナではありません。また、この資料ではubuntuをベースにしており、そのうえでContainerd（コンテナのデーモン）の上でコンテナを乗せ、それをKubernetesで管理しますのでDockerは不要です。Containerdはハイパーバイザーではなくコンテナランタイム（実行エンジン）といいます。
+
+さて、Windowsではコンテナを動かすにはDocker Desktopが必要です。Dockerをインストールすると以下のことをやってくれます。
+・WSL2 は有効化・セットアップされる
+・Linux ディストリビューション（Docker用）が作られる
+・その中に containerd が自動で入って起動する
+※WSL2とはWindows server for Linux Virsion2、Windows上でLinuxを動作させる仕組み
+
+なので、Windowsではユーザが containerd を意識してインストールする必要はない。Docker DesktopはWSL2管理、Containerd、CLI、UIなど様々な機能を持ったDocker専用のハイパーバイザーです。
+1.3 Kubernetesとはなにか？
+Kubernetesはクーバネテスと読みます。また、K8sと記載している場合もあります。Ｋとsの間に文字が8個あるからです。Kubernetesはコンテナ化されたアプリのデプロイ、スケーリング、管理を自動化するオープンソースのプラットフォームです。まとめていうとコンテナのオーケストレーションツールです。
+Kubernetesで利用する上で、ポッドという言葉がでてきます。ポッド（Pod）とは、複数のコンテナをグループ化し、Kubernetesで管理するための最小単位のこと。ポッドの中には１つ以上のコンテナが存在します。
+Kubernetesは「containerdを直接触らずに、クラスタ全体の“あるべき状態”を維持する司令塔」
+
+
+コントローラーと複数のワーカーノードの関係性
+ 
+※上記はChatGPTが作成したので細かい部分での正確性はイマイチ不明です。
+間違えていたらご指摘ください。のちのちわかってくると思います。今はなんとなくこんな登場人物がいるということだけ理解すればいいのでこれを使っています。
+
+Kubernetesは「API Server を中心に “あるべき状態” を決め、各ノードの kubelet に命令し、containerd が実際に Pod を動かす仕組み」です。
+KubernetesはGoogleによって開始され、2015年7月にv1.0がリリースされると、GoogleはLinux Foundationの最大のサブ財団の1つであるCloud Native Computing Foundation（CNCF）に寄贈しました。Kubernetesの新バージョンは4カ月周期でリリースされます。現在の安定バージョンは1.29です。（2023年12月現在）。
+1.3.1 Kubernetesの特徴
+ここで参考動画をみるといいですね。最初の章だけ10分ぐらい
+Kubernetes Tutorial for Beginners [FULL COURSE in 4 Hours] - YouTube
+・高い稼働率（というよりもダウンタイムがない）
+・スケーラビリティ（高いパフォーマンス）
+・ディザスタリカバリ
+
+Control Plane 側（司令部）
+① API Server（すべての入口）の役割
+Kubernetes 唯一の正面玄関
+すべての操作はここを通ります。
+kubectl apply
+kubelet からの状態報告
+Scheduler / Controller からの更新
+② etcd（正解データの金庫）
+クラスタの 全状態を保存している。
+保存しているもの
+•	Pod 定義
+•	Node 状態
+•	Service
+•	ConfigMap / Secret など
+③scheduler（置き場所を決める人）
+Pod を どの Worker Node に置くか決定
+判断材料
+CPU / メモリ空き
+Node のラベル
+taint / toleration
+affinity / anti-affinity
+「この Pod は worker-1 に置こう」まで決める
+（※ 実行はしない）
+④DNS Service（名前解決）
+※ 図では Control Plane 側に描かれがちだが、実体は CoreDNS Pod（Worker 上）
+
+Worker Node 側
+① kubelet（現場監督・超重要）
+何をする？
+API Server を常時監視し、「このNodeでこのPodを動かせ」という命令を受けると、
+containerd に実行を依頼
+Podの状態を報告
+kubelet = Kubernetesの“手と足”
+※ kubeletが止まると
+→ そのNodeは Kubernetes から見て「死んだ」
+②containerd（実行エンジン）
+コンテナイメージを pull
+コンテナを起動 / 停止
+プロセス管理
+実際にコンテナを動かしている唯一の存在
+※ Kubernetesは
+ containerdに直接「Podを起動せよ」とは言わない。
+ kubelet経由（CRI）で、しかもapi serverから指示をもらうのではなく、定期的にapi serverをwatchしている。
+③ kube-proxy（通信係）
+Service を実現するための通信制御
+iptables / ipvs を設定
+担当範囲
+ClusterIP
+NodePort
+LoadBalancer（内部）
+「このService宛の通信は、このPodに流せ」
+
+④ Pod（Kubernetesの最小単位）
+コンテナをまとめる箱
+IP・Port・Volumeを共有
+重要ポイント
+Kubernetesは コンテナ単体を管理しない
+必ず Pod単位
+Pod = デプロイと管理の最小単位
+⑤ Container（中身）
+アプリケーションそのもの
+nginx / app / batch など
+containerdが直接管理
+処理の流れ
+1.	ユーザーが kubectl apply
+2.	API Server が受け取る
+3.	etcd に「あるべき状態」を保存
+4.	Scheduler が Node を決定
+5.	kubelet が命令を検知
+6.	kubelet → containerd（CRI）→CRIとはkubelet用のAPI仕様と考える。
+7.	containerd が Pod 内の Container を起動
+8.	kube-proxy が通信経路を整備
+9.	kubelet が状態を API Server に報告
+※CRI（Container Runtime Interface）とは
+kubelet と コンテナ実行エンジンの間にある「標準インターフェース」 です。
+上記で説明していないのはDBについて、DBをコンテナにすることもできるがDBが冗長化されるとDBの整合性を保つ部分がコンテナでは難しいのであまりやらないみたい。また以下のConfig MAPという考え方も紹介されている。
+ 
+以下のようにPodにはそれぞれ内部的なIPアドレスがついている。
+ 
+上記のようにPodが死ぬと、、以下のように再生される。ただし、この時新しいIPアドレスで再生される。
+ 
+なので、IPで通信していると困るのでserviceというものを作成してこれを使っている。すべて抽象化されている。Service（例えばNginxのサービス）のIPアドレスはずっと固定
+ 
+また、外部からアクセスする場合は以下のようにportを指定してアクセスする。DBのようなサービスは外部からはアクセスできない。ExternelサービスとInternalサービスがある。
+ 
+また、検証などではいちいちURLでアクセスしません。物理IPでアクセスする。
+ 
+実際にユーザがアクセスする場合はhttpsなどのセキュアーなプロトコル＋URLでアクセスする。当たり前のこと。。
+ 
+そして、このような外部からの入り口のことをIngressという。
+ 
+IngressのURLで接続してきたら、それをserviceと紐づけているイメージです。
+ 
+またDBを使う場合はConfigMAPとSecretというものもあります。ConfigMAPは参照されるDBのURLを記述し、SecretはそのDBにアクセスするUser/passを保存します。ただ、Secretはbase64エンコードという方式で文字変換するだけで、だれでも複合できてしまう。デフォルトではセキュアではない。もし、セキュアに管理したいならetcd encryption at rest などを有効化するなどが必要とのことです（ここはまた別途）
+ 
+また、WEBサーバの部分（My-appとなっている部分）などは壊れてもでdeploymentという機能でもう１つのpodを自動的に作成できるが、DBは外部に共通ストレージを置く必要がある。（下記の図には記載していないが、VolumeといってDBの機能として用意されている。）また、そのVolumeへの書き込みをStatefulに管理しないといけない。（どちらのDBからアクセスしてもデータの整合性をとらないといけない）そのためにStatefulsetという機能もある。
+ 
+でも、まだよくわからないね。
+私の疑問『アプリ開発者はWEBサーバ＋APサーバ＋DBサーバなどの3層構造を１つのコンテナにするのが一般的ですか？』
+→答えはNO！一般的には以下のように１つの役割を１つのコンテナでおこないます。
+ 
+VMで作る場合はどうでしょうか？
+ハイパーバイザーにOSをインストールして、ミドルウエアを入れて、設定ファイルをいれて、これを構築する手順書を作成して、その構築手順書をもとにして再構築（あるいはバックアップを使うにしてもデータ量は膨大だった）していたが、ものすごい手間がかかっていた。ミドルウエアのバージョンが違ってたとかは問題外だがそういうミスもありがち。。
+でも、コンテナなら。。
+「人は環境を作らない」
+「環境はコードから自動生成される」よって、簡単で構成ミスがない。
+なんのこっちゃと思うのですが、インストールとかやらなくていい。すべてYamlファイルに書いておいてそれを実行するだけだから。。ということなんですね。
+ 
+例えばWebserver（nginx）を立てるのも、インターネット上のサイトからnginxのイメージをCOPYしてきて立ち上げるのです。なので検証機も本番機も同じ環境ができます。
+
+
+
+2 Kubernetesの検証
+2.1 前準備
+Proxmox内に以下のubuntu(24.x)ノードを3台作成します。
+[ Proxmox ]
+ ├─ Ubuntu 24.x : control-plane
+ ├─ Ubuntu 24.x : worker-1
+ └─ Ubuntu 24.x : worker-2
+2.2 Kubernetes基礎の実習内容
+1️⃣ 全ノード共通の下準備
+2️⃣ control-plane 初期化（kubeadm init）
+3️⃣ worker を 2台join
+4️⃣ CNI（Podネットワーク）導入
+5️⃣ Podが立つことを確認
+2.2.1 全ノード共通の下準備　SWAP　off
+Kubernetes / コンテナは「メモリ上で動く前提で、swap に逃げられると制御不能になる」ので swap を禁止しています。よって、最初にSwapすること（メモリーが足りなくなったときに一時的にDiskのSwap領域に退避すること）を禁止していいるので、Swapという動作をdisableしておきます。
+sudo swapoff -a　　　　　　　　　　　　　　→swapoffするコマンド
+sudo sed -i '/ swap / s/^/#/' /etc/fstab　　　　→fstabからも削除します。
+ 
+free -h　で確認。
+Swap: total 0B　になっていること。
+ 
+2.2.2 カーネルモジュール & sysctlの設定
+カーネルモジュールの設定以下をコピペしてください。
+sudo tee /etc/modules-load.d/k8s.conf <<EOF
+overlay
+br_netfilter
+EOF
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
+次にsysctlの設定です。以下をコピペしてください。
+sudo tee /etc/sysctl.d/k8s.conf <<EOF
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+
+sudo sysctl --system
+
+以下実施したときのログです。
+ 
+2.2.3 container runtime（containerd）
+※繰り返しますが、Ubuntu 24.x では Dockerは不要です。
+sudo apt update
+sudo apt install -y containerd
+containerdの設定
+
+ 
+cgroup v2 対応（重要）
+Ubuntu 24.x ではcontainerd を入れただけでは /etc/containerd は自動作成されないのでdirを作成する。
+sudo mkdir -p /etc/containerd
+ls -ld /etc/containerd
+ 
+最初にcontainerd のデフォルト設定を生成する
+sudo containerd config default | sudo tee /etc/containerd/config.toml
+長いログがでます。
+ 
+確認
+ls -l /etc/containerd/config.toml
+cgroup v2 用に修正
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' \
+  /etc/containerd/config.toml
+確認
+grep SystemdCgroup /etc/containerd/config.toml
+ 
+containerd 再起動
+sudo systemctl restart containerd
+sudo systemctl enable containerd
+以下で状態を確認
+systemctl status containerd　　　　　→runningになっていること。
+ 
+containerd --version　　→バージョン確認
+ 
+kubeadm / kubelet / kubectl　をインストールする（ここも全ノード共通）
+sudo apt update
+sudo apt install -y apt-transport-https ca-certificates curl
+ 
+次はこれ
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key \
+| sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+ 
+次はこれ
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] \
+https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /" \
+| sudo tee /etc/apt/sources.list.d/kubernetes.list
+ 
+最後はこれ！！
+sudo apt update
+sudo apt install -y kubelet kubeadm kubectl
+sudo apt-mark hold kubelet kubeadm kubectl
+ 
+次の設定からはControllerノードとWorkerで設定が異なりますので注意してください。
+また、前提として、今は以下のIP アドレスになっています。皆さんの環境にあわせてIPアドレスを修正してください。
+ControllerのIP：192.168.100.5
+Worker001のIP：192.168.100.3
+Worker002のIP：192.168.100.1
+
+Controllerでやること。
+kubeadm init は controller（control-plane）ノードだけ で実行します。
+controller（192.168.100.5）で kubeadm init
+worker01 / worker02 は kubeadm join だけ
+以下はコントローラーだけです。
+sudo kubeadm init \
+  --apiserver-advertise-address=192.168.100.5 \
+  --pod-network-cidr=10.244.0.0/16
+説明＞--apiserver-advertise-address は controller の Node IP
+説明＞--pod-network-cidr=10.244.0.0/16 は（例として）Flannelを使う前提のPod用アドレス帯
+※長いログは削除しています。
+ 
+
+次にコントローラーでkubectl を使えるようにします
+mkdir -p $HOME/.kube
+sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+ 
+
+次にコントローラーでCNI（Flannel）を入れる
+kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+ 
+2.2.4 WorkerノードをKubernetesのコントローラーにJoinさせる。
+次にコントローラーでtokenを生成します。
+sudo kubeadm token create --print-join-command
+ 
+すると、そのままコピペできる join コマンドが1行で出ます。（上記の赤枠の部分）これの先頭にsudoをつけて各Workerノードで実行します。
+以下workerノードでの実行例です。worker001もworker002も共通です。
+ 
+コントローラー側で以下を実行します。以下のようになれば正常です。
+kubectl get nodes
+ 
+2.2.5 Pod をrunで起動する。削除する。
+コントローラ側で以下を実行します。NodeはRunningにはなっているがpodがまだない状態です。
+kubectl get node -o wide
+kubectl get pod
+ 
+では、この状態からrunでnginxを起動してみます。
+kubectl run nginx-pod --image=nginx:1.24.0 --restart=Never
+kubectl get pod -o wide
+ 
+Podを作成した直後はIPアドレスがない場合もありますが、少し待つとIPアドレスが取得されます。上記の結果を分析するとnginxがworker002で動いていることがわかります。IPアドレスは10.244.2.10です。
+schedulerがReady な worker の中から空いているノードを選んだという、ごく基本的で正常な動きです。
+ここで作成したpodを消すには以下のコマンドになります。Pod名は上記のNAMEで示された名前を使います。先ほどpodを作成したときにnginx-podとしています。
+kubectl delete pod nginx-pod
+ 
+Podを消したらpodがなくなりました。当たり前なんですが、Kubenetesでは消しても生き返るのがあたりまえなんです！ここはまた後で説明します。
+その前に、先ほどは以下のコマンドを使いました。
+kubectl run nginx-pod --image=nginx:1.24.0 --restart=Never
+でrestart=Neverを入れているのですが、これは「Pod内でエラーがあった時に再起動をしない設定」です。また、restart=AlwaysとやるとPod 内でコンテナが落ちると再起動するのですが、さすがにpod自体をdeleteしたらpodは消えます。
+ 
+一度、削除してから再度podを起動したら今度はworker001側でpodが動いています。Kubenetesが空いているノードで自動的にpodを作っています。
+ 
+さて、以下のcurlコマンドでpodが動いていることを確認できます。Pod は 入れ物で、その中で nginx コンテナが1つ動いているイメージでOKです。
+
+Podのipアドレスを調べておき、Kubenetesのクラスターに入っているノードからアドレスにcurlコマンドでアクセスしてみましょう。“Welcome to nginx“と出てきます。WEBサーバが動いていることがわかります。
+curl 10.244.1.10でOK
+ 
+関野メモ＞ただし、自分のPCのブラウザからこのWEBサーバにアクセスする場合は別の設定が必要です。（nodeportのserviceやnginxの前にserviceを作る必要がある。ここはまた後で）
+
+もう少し、runについて考えてみます。
+先ほどは
+kubectl run nginx-pod --image=nginx:1.24.0 --restart=Never
+とやりましたが、以下のコマンドも可能です。
+kubectl run nginx --image=nginx
+違いはnginxのバージョンを指定しているか、指定していないかです。バージョンを指定しない場合は、イメージ自体はデフォルトのコンテナレジストリから pull されます。イメージを指定した場合、すでにそのイメージファイルがあればインターネット上のイメージをとりにいきません。バージョンを指定していない場合は常に最新のバージョンをとりに行きます。また、先ほどデフォルトのコンテナレジストリからと記載しましたが、“デフォルトの実体”は通常は Docker Hub（docker.io）になります。細かい話ですが
+nginx を pull するとき、内部では何が起きている？
+これは内部的に以下のサイトからPULLして来いという指示になります。
+docker.io/library/nginx:latest　→ここからPULLして来いということ。
+そして 実際の通信先 はここ👇です。
+https://registry-1.docker.io/v2/
+さて、podを起動した直後にpodを見るとIPアドレスがない場合があります。CNIがPodにIPを割り当てるのは「コンテナ起動直前〜直後」です。
+そのため：
+ContainerCreating 中 → IP なし
+Running になる → IP が表示される
+こういう形になります。といっても瞬時にIPは発番されます。
+CNIとは、（CNI = Container Network Interface）Kubernetes が「Pod にネットワークをつなぐ」ための仕組です。
+kubernetes 本体（kubelet）は ネットワークを作りません。
+代わりに CNI に「これお願い」と依頼します。
+CNI がやることは主にこの4つです：
+１．Pod に IP アドレスを割り当てる
+２．Pod の仮想NICを作る
+３．Node 間で Pod が通信できるようにする
+４．Pod 削除時に後始末をする
+Pod は 入れ物で、その中で nginx コンテナが1つ動いているイメージでOKです。
+IPアドレスがない場合でもしばらくすると以下のようにIPアドレスが振られます。
+ 
+2.2.6 Podを２つ以上にしてみる。
+ここまではpodは一台でした。Podをもう一つ作成します。
+kubectl run nginx-pod --image=nginx:1.24.0 --restart=Never
+ 
+でも、これだとpods "nginx-pod" already existsとなってしまいます。
+じゃあ、どうやって２つめを作成するのでしょうか？
+Runではありません。create deploymentというコマンドを使います。またreplicas=2とすると2台のnginxのpodを立ててくれます。
+すでにrunでpodが起動している場合はdeleteしてからやってください。
+また、svcを作成している場合はserviceも削除しましょう。
+kubectl delete pod nginx-pod
+kubectl delete svc nginx-svc
+ 
+
+2.2.7 create deploymentでpodを作成する
+kubectl create deployment デプロイメント名 –image=実行イメージ
+kubectl create deployment nginx --image=nginx:1.24.0
+ 
+次にreplicasを２にします。
+kubectl scale deployment nginx --replicas=2
+kubectl get pod -o wide
+ 
+2台のpodができています。
+関野メモ＞ちなみに、create deploymentのデフォルトの—replicasは=1です。
+create deploymentでpodを作成した場合とrunで作成した場合の決定的な違いはrunはpodをdeleteしたら普通に消えましたが、create deploymentは自動でpodが再作成されることです！！スゲー
+create deploymentで作成したpod名を指定してdelete　podで消してみてください。すぐに新しいpodが出来上がります。これはコントローラ側のetcd内にdeploymentでreplicas=1となっていたら、それを常にチェックして立ててくれるわけですね。なので、replicas=2にしたら、常に2台が起動しています。まさに自動復旧型のクラスタ！これがKubernetesです。まあ、もっとすごいところがたくさんあるのですが私が驚いたpointはまずここですね。
+では次にnginx用のclusterIPをアサインするためにnginx用のserviceを作ります。nginx用のserviceというのは一般的はAWSのALBがロードバランスするときに使うものです。（詳細は別途説明します）
+以下のコマンドでexpose deploymentとしてnginxというdeployment名を指定します。
+また、サービス名はnginx-svcとしていますが、ここも任意の名前でOKです。
+kubectl expose deployment nginx --name=nginx-svc --port=80
+kubectl get svc -o wide
+ 
+このnginx-svc用のClusterIPをたたくと、2台のpodに負荷分散されます。
+2.2.8 Kubernetesにおける負荷分散の方法
+Kubernetesにおける負荷分散の方法もまた、NW屋さんにとっては非常に理解しがたい方法を使っています。LBでround robinで負荷分散するようなやり方ではなく、iptablesでやります。Service（nginx-svc）が作成され、Pod が Ready で Endpoint に載った瞬間にkube-proxy が iptables を生成・更新し、負荷分散は「すでに有効」になっています。通信が来たときにiptablesを作るのではなく、事前生成です。
+今はこうなっています。IptablesでDestination NATをいれています。
+ 
+2.2.9 実際にDestination NAT テーブルを見てみる
+sudo iptables -t nat -L -n --line-numbers
+nginx-svc の Service チェーンを探す
+sudo iptables -t nat -L KUBE-SERVICES -n | grep nginx
+ 
+ここで出てきたnginx-svcのService チェーン調べる
+sudo iptables -t nat -L KUBE-SVC-HL5LMXD5JFHQZ6LN -n
+ 
+
+これが「分散ロジック」そのものです。新規 TCP コネクションごとに確率的にどちらかの Pod が選ばれるように設定されています。設定ファイルなのになんかロジックみたいなものを書いているように見えますが、
+iptables は「ロジックを書いてもいい」設計で、kube-proxy はそのロジックとしてstatistic mode random probability を使っている。なので、見えている このiptables ルールが= Kubernetes Service の負荷分散アルゴリズムです。
+同じTCPコネクションは同じpodにいきます。
+statistic mode random probability 0.50000000000
+となっているので、新しい TCP コネクションが来たら、50% の確率で Pod 10.244.1.11:80 に送るということになります。
+curlコマンドでやった場合は、毎回別々のTCPコネクションになるので50%の確立で負荷分散される。
+2.2.10 Iptablesを使った負荷分散を確認する
+本当にこんなことをやっているのか気になります。
+以下の方法で負荷分散しているか確認しましょう。
+まず、現在のpod名を確認して、それぞれのpodのnginxのindex.htmlをpodのhost名に書き換えます。
+ 
+kubectl get pod -l app=nginx -o name
+kubectl exec -it pod/nginx-c6988f66f-mt6sx -- sh -c 'hostname > /usr/share/nginx/html/index.html'
+赤枠部分をpodのホスト名に変更する。
+Viで以下のシェルスクリプトを作成します。
+vi check_lb.sh
+＊＊＊以下をはりつけてください。＊＊＊
+#!/bin/bash
+
+while true; do
+  date
+  curl -s http://10.96.249.95 | tr -d "\n"
+  echo
+  sleep 1
+done
+
+＊＊＊ここまで＊＊＊
+chmod +x check_lb.sh　　　→実行権限をつける
+ls -l check_lb.sh　　　→確認
+./check_lb.sh　　　→シェルスクリプトの実行
+以下のログのようにpod名が交互にでてきたら成功です。必ずしもバッチリ交互になるわけではありません。
+ 
+関野メモ＞
+curl -s http://10.96.249.95 | tr -d "\n"　の解説
+-sはsilentで余計なものを表示させない。レスポンス本文だけを表示したい場合につける。tr -d "\n"は返ってきた内容から改行だけを消して表示する。
+です。
+2.2.11 外部のPCからpodにアクセスする方法
+さて、ここで現在のNW構成を書いてみてください。
+この手順書ではinitするときに以下のコマンドを入れています。つまり、コントローラのIPアドレスを192.168.100.5を使うと指定しています。また、podは10.244.x.xのIPになっています。これもinitするときに指定していますね。
+sudo kubeadm init \
+  --apiserver-advertise-address=192.168.100.5 \
+  --pod-network-cidr=10.244.0.0/16
+
+
+
+
+
+
+
+
+
+
+
+
+つまり、このpod側の10.244.x.xには物理PCから（例えば、192.168.100.x）にいるPCからは直接は通信できません。ではどのようにアクセスするのでしょうか？
+
+やり方は２つあります。
+１つはport forward設定で、もう一つはnodeportというサービスを作る方法です。
+kubectl port-forward --address 0.0.0.0 svc/nginx-svc 8080:80
+上記をやるとプロンプトがかえってきません。Cont＋Cで止めるまでPort forward状態になります。ただし、これは検証用です。理由は--address 0.0.0.0の部分はどこからのアクセスを許可するか？という設定になるためです。0.0.0.0なのでどこからでもOKという状態です。一般的な環境ではこのような設定はしません。
+ 
+この状態で自分のPCから192.168.100.5:8080（コントローラのIP:8080）にアクセスします。するとpodにアクセスして応答がかえってきます。先ほどhtmlファイルを変更したのでこのようにノード名が表示されるだけですが、デフォルトではnginxのテストページが表示されるはずなので、元にもどしましょう。
+Kubernetesっぽくもとに戻すやりかたは？→もちろん、podを削除することです。すると自動的に新しいpodが生成されます。
+以下の画面ではnginx-c6988f66f-rtvm2にアクセスしているのでこちらのpodを削除します。
+ 
+kubectl delete pod nginx-c6988f66f-rtvm2　で消した
+ 
+もう１つの方にアクセスしたので上記になった。こちらも消す
+kubectl delete pod nginx-c6988f66f-mt6sx
+今度はnginxのデフォルトのテストページが表示されました！
+ 
+ブラウザのキャッシュはクリヤーしながらやってください。また、podを削除したらport　forwardの設定もやり直してください。
+
+2.2.12 NodePort経由でnginxにアクセスする
+次は皆さんのブラウザからnginxにアクセスできるようにするために  Pod nginx の前に NodePortというサービスを作ります。
+
+
+kubectl expose deployment nginx \
+  --type=NodePort \
+  --port=80 \
+  --name=nginx-nodeport
+ 
+nginx-nodeportというサービスができています。
+自分のPCからコントローラにアクセスしてください。
+私の場合はhttp://192.168.3.231:31987/でやっています。
+これ、自宅にいる場合です。自宅からコントローラにアクセスする場合は192.168.3.x
+出先からfortigateのssl/vpnで入る場合は192.168.100.x側から入りますので
+画面ショットのIPアドレスが変わることがありますがご容赦ください。
+ 
+
+
+ちなみに、worker001やworker002のアドレス：31987でも同様にpodにアクセスできます。
+ 
+ 
+なぜ、どのクラスターノードからやっても同じ結果が得られるのか？それは、NodePort Service は『クラスタ内のすべてのノードで同じポートを待ち受ける仕組み』だから
+どのノードの IP : NodePort にアクセスしても OK。
+実際の Pod がどのノードにいても、
+kube-proxy が各ノード上で iptables（または IPVS）を設定し、
+Service に紐づく Pod（Endpoint）へ転送する。
+もう少し詳しく記載してみます。
+・NodePort Service を作成すると、kube-proxy により各ノードに iptables（または IPVS）が設定される。
+・これらの iptables ルールは Service / Endpoint の観点では
+全ノードでほぼ同一の構造を持ち、どのノードにアクセスしても同様の分散ロジックでPod へ転送される。
+・ただし iptables は状態を持たない確率ベースの分散であり、ノードごとの経路差やセッション開始タイミングにより、実際に選ばれる Pod は必ずしも同一にはならない。
+つまり、最初のアクセス先がコントローラで、最終的なpodはworker002の中のpodということもあります。入口ノード（NodePort を受けたノード）と、最終的に Pod が存在するノードが異なる場合、 Pod 宛てのパケットは CNI（Flannel）の VXLAN によってカプセル化され、 対象ノードへ転送されるとありますが、帰りのパケットはまた、入口ノードにもどされてそこからアクセスしたブラウザに戻ります。
+ 
+
+
+
+
+ブラウザからnodeport経由でPODにアクセスする流れを示します。
+①	Browserで192.168.3.231:31987をたたく  →
+②	アクセスを受けたノード上で、kube-proxy が設定した
+　 iptables（または IPVS）のルールにより
+　 NodePort → Service（nginx-nodeport）にマッチし、
+　 Service に紐づく Endpoint（Pod nginx: 10.244.x.x:80）へ転送される
+つまり今回はコントローラ側でNodePortというサービスを作成したのですが、このサービスは外部からアクセスするためのtcp portを作成するというものです。そして、「全Nodeに同じポートを開ける」というのが仕様です。
+つまり：
+Pod がどの worker にいるかは関係ない。control-plane であってもworker であってもNodePort を持つ Service は全Nodeで待ち受けるように設定されます。
+
+2.2.13 ここまでの振り返り
+ブラウザからアクセスしてNginxが動いていることが実感できたところでもう一度、どうやってnginxのコンテナを入れたかを復習しましょう。
+nginx はPod 起動時に、Kubernetes（正確には containerd）が自動で取得しています。
+以下のコマンドを実行すると、
+kubectl run nginx --image=nginx --restart=Never
+Kubernetes が理解した指示は。。。
+イメージ名：nginx
+レジストリ（イメージを取得してくる場所）の指定なし
+👉 つまり Kubernetes はこう解釈します：
+「Docker Hub にある公式の nginx イメージを使え」
+ということで、知らない間にDocker Hubからとってきていたんですね。
+関野メモ＞ちなみに、GitHubと似ていますが、置いてある内容が違いますので注意です。
+GitHub：ソースコード置き場
+Docker Hub：コンテナイメージ置き場
+ちなみに、nginxは「エンジンエックス」 と読みます。
+
+さて、先ほどのkubectl run ... を実行すると何が起きるのか詳細に見ていきます。
+kubectl run nginx --image=nginx --restart=Never
+起きている流れは。。
+①	Kubectlが→ API Server に「nginx Pod を作れ」と依頼
+②	Schedulerが→ どの Worker で動かすか決定
+③	kubelet（Workerノードのこと）が→ containerd に「このイメージ（nginx）でコンテナ起動しろ」と指示
+④	containerdがローカルにイメージ（nginx）があるか確認
+なければ pull（インターネットからコンテナイメージをダウンロードしてくること）
+あれば pull しない
+コンテナ起動で終了
+関野メモ＞pull するのは containerdです。Pod 起動時に自動で判断します。
+じゃあ毎回「インターネットに繋がってないと起動しないの？」と思いますよね。
+結論
+❌ 常にインターネットは必要ではない
+✅ イメージが無い場合だけ必要です。
+ケースA：イメージがまだ無い（初回）場合はローカルに nginx イメージなし
+containerd が docker.io に pullを指示するのでインターネット接続は必須です。
+ケースB：すでに pull 済みで/var/lib/containerd に nginx イメージあり
+containerd はそれを使う。この場合はインターネット不要です。
+関野メモの続き＞ただし、ここで効いてくるのが imagePullPolicyです。
+デフォルト挙動は
+イメージのバージョンを指定すると	imagePullPolicy
+nginx（latest）→Always
+nginx:1.24.0　　→IfNotPresent
+今回のコマンドは？
+--image=nginx　　でしたので、バージョンを指定していません。よって、
+＝ nginx:latestとなり→常にLatestをとってくるという意味です。
+毎回 pull しに行く（Always）。よって、オフラインだと失敗します。
+オフラインでも確実に起動したい場合は？
+バージョン固定（基本）にすればOK（コマンド例は以下）
+kubectl run nginx --image=nginx:1.24.0 --restart=Never
+一度 pull しておけば以降はネット不要です。
+2.2.14 Kubernetesのサービスについて
+さて、以下のコマンドでKubernetes内部で利用しているアドレスがわかります。
+コントローラーから以下のコマンドをいれてみましょう。
+kubectl get svc 
+kubectl get pods -o wide
+ 
+kubernetes（10.96.0.1）
+このアドレスは何でしょうか？
+👉 Kubernetes API Server の Service用の内部のIPアドレスです。よって、外部からここにアクセスすることはありあせん。
+kubelet
+kubectl
+Controller
+が 必ずここにアクセスします。こんなイメージ
+kubelet ──▶ 10.96.0.1:443 ──▶ API Server
+Kubernetes自身のためのIPです。アプリ通信とは無関係。
+
+次に、nginx-svc（ClusterIP: 10.109.19.234）
+これは何でしょうか？nginx Pod への“内部向け窓口”という説明になりますが、全然意味がわかりません。ClusterIPといったらNW屋さんとしてはユーザがアクセスしてくるVIPをイメージしますが、これはそれではありません。
+ 
+ここで、ip a でunixノードが外部と通信するアドレスを確認してみる。
+ 
+
+flannel.1 というのがありますが 10.224.0.0/32 は、まさに Kubernetes の Pod ネットワークの正体です。flannel.1 は Flannel が作る “Podネットワーク用の仮想インターフェース”10.224.0.0/32 です。「このノードが代表として持つ Pod ネットワークの入口アドレス」
+Flannel は CNI（Container Network Interface）プラグインの一種で、
+「別ノードにある Pod とも、まるで同一ネットワークにいるかのように通信させる仕組み」
+を提供します。
+関野メモ＞Flannel（フランネル）は暖かくて起毛のある織物のこと。肌ざわりが柔らかいのがフランネルの仕事です。
+もう少し、Flunnelについて調べてみます。
+👉 Pod ネットワーク = 10.224.0.0/16
+のような範囲が使われています。
+上記のログはコントローラーのもので、10.244.0.1/24がPod用のネットワークとしてつかわれています。
+flannel.1 インターフェースの正体
+これは何か？
+Linux の 仮想ネットワークインターフェース
+種類としては VXLAN デバイスになります。（なんとこんなところでvxlanと出会うとは！）本当にvxlanなんて使われてるのかよ？と疑り部会人のために。。
+ip -d link show
+とやるとflannel.1がvxlanであることがわかります。
+ 
+なぜここでvxlanが登場したのか？NW屋さんには非常に興味深いところです。VXLANは「ノードが違っても、Pod同士を“同一L2セグメントにいるかのように”通信させるため」に使われています。
+Kubernetes には、CNIに対する絶対条件があります。
+① Pod は IP を持つ
+Pod ごとにユニークIP
+NATなし
+② Pod ↔ Pod は直接通信できる
+ノードが違っても
+ルーティングやNATを意識しない
+③ Pod は「同一ネットワーク」に見える
+アプリは
+「相手が同じセグメントかどうか」を気にしない
+👉
+これ、物理ネットワークだけではほぼ不可能です。
+でも、ネットワーク機器で実現するVTEPのようなことはやっておらず、代わりにflannel.1がVTEPのような役割を果たします。以下、コントローラーで
+bridge fdb show dev flannel.1
+をやると、worker001やworker002のMACアドレスがでてきます。
+ 
+
+
+ 
+ 
+
+2.2.15 ここまでやった内容の構成図を書いてみよう
+でもかけないよね。。なんだかまだよくわからないので。。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+2.2.16 Podとなにか？Podの削除、作成をやってみよう。
+ここでworker002（nginxが動いている方）でip aをやると、こちらはflannel.1のサブネットが10.224.2.0となっており、cni0が10.224.2.1になっています。コントローラーとは違うIPが振られます。
+ 
+ここで注目したいのは、コントローラーでpodのIPを調べたときには以下のようになっていた。
+cni0はbridgeでここについているIPが10.244.2.1なんですね。
+kubectl get svc 
+kubectl get pods -o wide
+ 
+実際のnginxのIPは10.244.2.2であることがわかります。
+ではここでコントローラーから以下のコマンドを入れてみてください。
+kubectl get svc
+kubectl get pod -o wide　→10.244.2.2（Worker002にnginx）があることを確認
+kubectl delete pod nginx　→nginxのpodを消す
+kubectl get pod -o wide　→10.244.2.2がなくなっている。
+ 
+Nginxを起動する（今回はバージョンを指定してみた）
+kubectl run nginx --image=nginx:1.24.0 --restart=Never
+kubectl get pod -o wide　で確認、
+アドレスが10.244.1.2になっている！これはworker001のアドレスです。
+ 
+2.2.17 Kubernetesのpodを複数作成して分散させる
+いろんなやり方があるようですが、今回は「常に複数個を維持して分散させる」というのをやります。（これが一番、Kubernetesっぽいやり方とのこと。By　GP）
+それを実現するために Deployment（replicas）という手法を使います。これが王道。
+そのために。
+1) いまの単体Podを消す
+kubectl delete pod nginx
+次に以下をやる
+2) Deploymentで2個起動
+kubectl create deployment nginx --image=nginx:1.24.0
+kubectl scale deployment nginx --replicas=2
+kubectl get pod -o wide
+ 
+※注意：ここはまだやっていませんが、できれば2ノードに分散させる（アンチアフィニティ）方法もあるようです。分散は「たいてい自然に」起きますが、確実にしたいなら podAntiAffinity を使う方法がある。（でも少し上級なのでまた後でやりたい。）
+
+
+
+では続いていきます。次に以下をやってみてください。
+kubectl delete pod -l app=nginx　　→これやると2個のpodが消えますが自動的に復活してきます。
+ 
+この実習でわかるのは、「Podは使い捨て」であり、「維持するのはDeployment」で常に維持できるということ！確かに自動的にノードが復活してきます。ここもどうなってるの？というところですがまあ、細かいことは後で理解するとして次にすすみます。
+さて、ここで問題が発生しています。
+自分のPCからhttp://192.168.100.1:32484にアクセスしたのですが通信できない状態になっていました。
+Nodeportの設定とpodへのアクセスの部分のどこかがおかしいと思われます。
+そこで、以下のログをみてみましょう。
+kubectl get endpoints nginx-nodeport -o wide
+kubectl get endpoints nginx-svc -o wide
+ 
+どちらもendpointがnoneとなっています。
+関野メモ＞うーーん、また出たよ！新しい用語..endpointって何？という気持ちはわかりますが、endpointって、普通のNW屋さんがLBの設定するときのリアルサーバです。
+なぜこうなったのでしょうか？先ほど、 kubectl run nginx ... をやり直してますよね。
+このとき Pod のラベルが変わったり、Pod自体が入れ替わります。
+一方で Service は 46h 前に作ったままなので、Service の selector が 古いラベルのままになっていて、Service が Pod を拾えないよって→それでEndpoints が空になっています。
+
+直し方（最短：selector を Pod のラベルに合わせる）
+まず、今動いている nginx Pod のラベルを確認します。
+kubectl get pod nginx --show-labels
+ 
+
+＜worker001,worker002の両方でnginxを動かしたら、192.168.100.1:32484でアクセスできなくなったぼ続きです＞
+service が拾うべき Pod が存在していない（= selector に一致する Pod が0）
+
+あなたの kubectl describe svc nginx-svc では
+Selector: run=nginx
+Endpoints: <none>
+になっています。
+これは
+run=nginx というラベルを持つ Pod が1つもいない
+だから Endpoints が空
+だから NodePort でも転送先がなくてアクセスできないという典型パターンです。
+「kubectl get pod nginx --show-labels」が NotFound になっている理由
+ここも重要で、画面にpods "nginx" not foundと出ていますよね。
+これは Podの名前が nginx ではないからです。
+（あなたの前の画面では nginx-<hash>-xxxxx という Deployment 配下の Pod が動いていました。）
+
+つまり今はPod名：nginx ではない（Deployment管理の名前）
+Serviceの selector：run=nginx（昔の kubectl run nginx の時代のラベル）でズレています。
+
+じゃあ「原因」は何？
+✅ 原因
+Service の selector が古い（または間違っている）ため、現在の Pod を1つも選べていない。
+
+すぐ直す手順（迷わない版）
+1) まず “今存在する Pod のラベル” を見る（名前は気にしない）
+kubectl get pod --show-labels
+ 
+ここで、例えば app=nginx とか app.kubernetes.io/name=nginx みたいなラベルが見えるはず。（あるね）
+2) Service の selector を Pod のラベルに合わせる
+たとえば Pod に app=nginx があるなら：
+
+kubectl patch svc nginx-svc -p '{"spec":{"selector":{"app":"nginx"}}}'
+kubectl patch svc nginx-nodeport -p '{"spec":{"selector":{"app":"nginx"}}}'
+ 
+Patchをあててみた。
+
+3) Endpoints が埋まったか確認
+kubectl get endpoints nginx-svc -o wide
+kubectl get endpoints nginx-nodeport -o wide
+10.244.x.x:80 が出れば勝ちです。
+でもENDPINTが出ない！！
+原因は先ほどやったコマンドだとダメです。
+kubectl patch svc nginx-svc -p '{"spec":{"selector":{"app":"nginx"}}}'
+kubectl patch svc nginx-nodeport -p '{"spec":{"selector":{"app":"nginx"}}}'
+これをやると、selectorにrun=nginxとapp=nginxが両方残ってしまうからです。置き換えではなく、addになります。なので、下記のコマンドで内部のyamlファイルを修正します。
+kubectl edit svc nginx-nodeport
+とやるとvi editorのようなものが起動します。なんやらわかりませんが、Selectorのとこが2行になっています。これをapp=nginxだけにします。ラベルの部分はrun=nginxのままでいいとのこと（GPより）
+ 
+上記の赤枠のrun:nginxを削除する。以下のようになります。
+ 
+ちなみに、このファイルってどこにあるの？何をするためのYamlファイル？ってGPに聞いてみたら、
+結論
+•	そのYAMLファイルは「どこにも保存されていない」
+•	kubectl edit が API Server 上の Service オブジェクトを直接編集するための一時ビュー
+•	目的は「Service の定義（宣言）を変更する」こと
+関野メモ＞うーん。またまた、ややこしい。内部的にはvi editorを呼び出しているようなんだけど。。。まあ、kubectl edit svc nginx-nodeportで呼び出すしかないんですね。
+とにかく、ここを修正したら、nginx-nodeport方だけはENDPINTが出ました！しかもちゃんと２つのpodが見えています。（冗長化されている）
+ 
+ですので同じようにkubectl edit svc nginx-svcでnginx-svcも修正します。
+kubectl edit svc nginx-svcとやると以下のeditor状態になります。
+ 
+Selectorの部分をapp=nginxだけにします。
+上記をやってから以下を入力すると。。
+kubectl get endpoints nginx-svc -o wide　でENDPINTが認識されているかを確認します。以下のように確認できています。
+ 
+ではこれで、自分のPCからhttp://192.168.100.1:32484をやると今度はpodにアクセスできています。
+ 
+ちょっと整理すると
+・nginx-svcは実際のWEBサービス
+　・nginx-nodeportはPCのブラウザから直接たたくためのportをつくるサービス。
+
+
+
+
+
+
+
+
+2.2.18 Kubernetesの設定を削除してすべて作りなおす。
+さて、ここまで来たのですが、まだ全然理解できていないのですべて作りなおしてみましょう。消したり作ったりが躊躇なくできるようになるとだんだんわかってきます。（NWも同じでciscoをwrite eraseで消しても、もとのイメージを保存しておけばもとに戻せるという自信がつくとだんだんわかってきます。余談でした。。）
+全体像（これからやること）
+・Controller / Worker 全ノードを初期化
+・Controller で kubeadm init
+・Controller で join token を発行
+・Worker で kubeadm join
+・CNI 再適用
+・動作確認
+①	全ノード共通：Kubernetes を完全に消す
+Controller / Worker 両方で実行
+sudo kubeadm reset -f
+ 
+これで消えるもの
+・kubelet 設定
+・証明書
+・cluster 情報
+・join 状態
+⚠️ CNI は消えないので手動で消す
+其の前にip aでCNIの設定が残っていることを確認する。Flannel.1やcni0はまだ残っている。
+ 
+
+⚠️ CNI は消えないので手動で消すということなんで、以下を実行する
+sudo rm -rf /etc/cni/net.d
+sudo rm -rf /var/lib/cni
+
+kubeconfig も削除
+rm -rf $HOME/.kube
+これをやってからrebootしてから、ip a で確認します。
+確かに今度はcniが消えている。
+ 
+②	 ネットワーク・iptables をクリーンに（推奨）（Service / NodePort 検証で残骸が残ることがあるため）でもrebootすればやらなくてもOKです。
+sudo iptables -F
+sudo iptables -t nat -F
+sudo iptables -t mangle -F
+sudo iptables -X
+一応、下記のコマンドでiptablesがクリヤーされているかを確認する。
+sudo iptables -L
+ 
+ここで、最初にやったswapがonになってしまっていませんか？
+この手順で初期化したらswap設定が戻ってしまいました。なので、swap をoffにしましょう。以下はswap onが残っている状態です。
+swapon --show
+ 
+sudo swapoff -a　→これがoffにするコマンドです
+swapon --show　→これが確認です。何も出なければswap offになっています。
+次回にrebootしてもswap offが戻らないようにfstabをセットします。
+sudo sed -i.bak '/\/swap.img/s/^/#/' /etc/fstab
+grep -n swap /etc/fstab　で確認
+ 
+ここれrebootする。その後、containerdとkubeletを再起動する。
+sudo systemctl restart containerd kubelet
+サーバのIPを指定してリセットします。
+sudo kubeadm init \
+  --pod-network-cidr=10.244.0.0/16 \
+  --apiserver-advertise-address=192.168.100.5
+ 
+途中略
+ 
+この赤枠の部分は必ずメモ帳にはりつけておく。
+kubeディレクトリーを作成する。
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+これをやってから、kubectl get nodesでエラーがないことを確認します。
+kubectl get nodes
+ 
+sudo ss -lntp | grep 6443
+ 
+このタイミングではcontrol-planeが NotReady → 正常です。
+そのあとにやること（順番大事です）
+この時点でip aとやるとまだFunnel.1とCNIがありません。
+Flannel applyをします。このオペレーションでFunnel.1とCNIが作成されます。
+kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+ 
+ip aで確認します。
+ 
+2.2.19 Workerノードからjoinする。
+ここでworker側をresetします。以前、joinした情報が残っている状態で新しいToken（initしたときに生成されたtoken）で接続してもエラーになりますので、resetします。
+sudo kubeadm reset -f
+
+ 
+その後、コントローラにjoinする設定をいれます。コントローラでinitしたときに出てきたTokenで接続します。
+ 
+
+
+コントローラ側で確認します。
+kubectl get nodes
+ 
+Worker002側でもresetしてからjoinしてから、確認します。
+ 
+詳細を見るには-o wideをつける
+kubectl get nodes -o wide
+ 
+ここまでできたら一応完了！ではここで、Kubernetesのpodを複数作成して分散させる　を再度やってみます。　Deploymentで2個起動する。
+kubectl create deployment nginx --image=nginx:1.24.0
+kubectl scale deployment nginx --replicas=2
+kubectl get pod -o wide
+ 
+Podができています。またIPが振られていませんが、もう一度やればいかのようにIPが振られています。
+ 
+ちなみに、FlanelとCNIとvethの関係はこれ
+ 
+なぜ veth が2つある？
+理由：Pod が2つ動いている
+control-plane ノードでは２つのPodがあります。
+CoreDNS Pod
+flannel Pod
+Podとvethの対応を見たいときは以下のコマンド
+kubectl get pods -n kube-system -o wide
+ 
+2.2.20 worker001のjoinを切断したいとき
+一度、接続したworkerを切断したいときはコントローラでおこないます。
+①	control-plane で node を cordon（任意だけど安全）
+kubectl cordon worker001
+②	control-plane で node を drain（Pod が載ってたら退避）
+kubectl drain worker001 --ignore-daemonsets --delete-emptydir-data
+③	control-plane で node を削除（API 上から消す）
+kubectl delete node worker001
+ 
+④	そして、worker001 側で “join 解除（初期化）”もやる。
+sudo kubeadm reset -f
+ 
+これでもういちど、joinしてみる。Sudoつけないとエラーになったので、sudoをつけてやりました。Joinコマンドは以前jpinしたときと同じTokenです。コントローラ側をinitしていなければjoinできます。
+ 
+これで、コントローラで以下をやって確認します。
+kubectl get nodes -o wide
+ 
+ちゃんとworker001が見えています。
+次にworker002もやりましょう。
+ 
+これで、コントローラで以下をやって確認します。
+kubectl get nodes -o wide
+ 
+worker002もjoinできました。
+ではここで、Kubernetesのpodを複数作成して分散させる　を再度やってみます。
+Deploymentで2個起動
+kubectl create deployment nginx --image=nginx:1.24.0
+kubectl scale deployment nginx --replicas=2
+kubectl get pod -o wide
+ 
+
+
+
+
+
+
+
+
+
+
+
+2.2.21 コントローラの名前を間違えていたときの対応
+ここは皆さんはやらなくていいです。私はホスト名をcontrol4k8sにしたかったのですが、まちがえてontrol4k8sになってしまっています。
+ 
+ここを直す手順を記載します。
+Kubernetes側の影響も多少あるので手順通りにやりましょう。
+正しい変更手順（control-plane）
+①	 Linux のホスト名を変更（もちろんコントローラ側でやります）
+sudo hostnamectl set-hostname control4k8s
+ 
+Hostname　コマンドで確認、もう変更されています。
+ 
+/etc/hosts を修正（重要）
+sudo vi /etc/hosts
+ 
+以下のように修正
+ 
+再起動
+sudo reboot
+直りました。
+ 
+
+Kubernetes 側での反映手順
+再起動後、古い Node 名が残ります。以下で確認。
+kubectl get nodes
+ 
+rebootしたら全部の設定が消えています！！
+ 
+よく見ると、ip addressが192.168.100.5からdhcpで192.168.100.2に変更されています。トラブルの原因になるので固定IPにしましょう。nanoまたはvi　editorで修正してください。
+cd /etc/netplan 　でどのファイルで動いているかを確認します。
+ls
+ 
+sudo vi /etc/netplan/50-cloud-init.yaml
+enp6s19の部分を以下のようにします。
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp6s19:
+      addresses:
+        - 192.168.100.5/24
+      routes:
+        - to: default
+          via: 192.168.100.1
+      nameservers:
+        addresses:
+          - 8.8.8.8
+          - 1.1.1.1
+編集後、netplanに設定を読み込ませる
+sudo netplan apply
+確認する
+ip a | grep 192.168.100
+ 
+これでOKです。
+再起動後、kubectl get nodesで古い Node 名が残っているか確認します。
+kubectl get nodes
+ 
+今はホスト名は正常になっていますが、Kubernetesの設定は『ontrol48ks』のままです。
+これを修正するにはinitからやり直す必要がある。
+control-plane をクラスタから一度外す
+kubectl drain ontrol4k8s \
+  --ignore-daemonsets \
+  --delete-emptydir-data
+上記をやってプロンプトが返ってこないなら、まず Ctrl + C で止めてOKです。
+drain は安全に中断できます
+以下で確認
+kubectl get pods -A -o wide --field-selector spec.nodeName=ontrol4k8s　
+ 
+Deleteコマンドで消しましょう。
+代替案（drain せずに削除）
+kubectl delete node ontrol4k8s
+ 
+
+Resetします。
+
+sudo kubeadm reset -f
+sudo kubeadm init \
+  --pod-network-cidr=10.244.0.0/16 \
+  --apiserver-advertise-address=192.168.100.5
+
+ 
+ログ途中省略＊＊最後にまたこのtokenでjoinしろという指示がでてきます。
+ 
+上記コマンドの部分はCOPＹしておいてください。。
+先に以下をやる
+mkdir -p $HOME/.kube
+sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+ 
+worker を再 joinさせる。さっきログででてきたjoinコマンドをsudoつきでやります。
+sudo kubeadm join 192.168.100.5:6443 --token cy3ry0.ctc3262h4kk7nlya \
+        --discovery-token-ca-cert-hash sha256:86a094e9e46c88df2db6931eadadbaa34a76c205aa770dacaf05302ef35ca88b
+ 
+でもエラーになっています。Worker001側に残骸が残っているとこのようになりますのできれいにします。
+
+worker001 を reset
+sudo kubeadm reset -f
+ 
+CNI / kubelet の残骸を掃除（これ大事）
+sudo rm -rf /etc/cni/net.d /var/lib/cni /var/lib/kubelet /etc/kubernetes
+sudo ip link del cni0 2>/dev/null || true
+sudo ip link del flannel.1 2>/dev/null || true
+kubelet / containerd 再起動
+sudo systemctl restart containerd kubelet
+10250 が消えたか確認（任意）
+sudo ss -lntp | grep 10250 || echo "10250 is free"
+もう一度 joinする。
+sudo kubeadm join 192.168.100.5:6443 --token cy3ry0.ctc3262h4kk7nlya \
+        --discovery-token-ca-cert-hash sha256:86a094e9e46c88df2db6931eadadbaa34a76c205aa770dacaf05302ef35ca88b
+ 
+今度はエラーがありません。
+コントローラ側でjoinできたことを確認します。コントローラの名前も正常になっています。
+kubectl get nodes
+ 
+同様にworker002もやりましょう。
+ 
+ちなみに、なぜ NotReady なのでしょうか（理由は1つ）
+Kubernetes ノードが Ready になる条件はこれです：
+kubelet が起動していて、かつ Pod ネットワーク（CNI）が使えること
+いまは：
+control-plane：✅ Flannel/CNI が入っている
+worker001 / worker002：❌ CNI（flannel）がまだ Pod を張れていないのでNotReadyで正常です。
+では、Deploymentで2個起動するをやってみましょう。
+kubectl create deployment nginx --image=nginx:1.24.0
+kubectl scale deployment nginx --replicas=2
+kubectl get pod -o wide
+ 
+ずっとpendingのままです。これはおかしい。。ip aを見てみると。。CNIがないじゃん！
+ 
+CNI（Funnel.1やcni0などのインターフェース、podが通信するために利用するもの）を作るにはFlannel applyをします。このオペレーションでFunnel.1とCNI
+kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+これで3回目なのでだんだんわかってきました。
+ 
+kubectl get node　で状態を確認するとこんどはreadyになっています。コントローラ側の方だけ消えていたんですね。
+ 
+ 
+では、あらためてDeploymentで2個起動するをやってみましょう。
+kubectl create deployment nginx --image=nginx:1.24.0
+kubectl scale deployment nginx --replicas=2
+kubectl get pod -o wide
+今度はRunningになりました。
+ 
+あれ？10.244.1.2と10.244.1.3になってる？？これどっちもWorker001です。以前やった時はworker001で１つ、worker002で１つあったよね。
+Worker001とworker002でip aをやるとこうなっています。
+Worker001にはcni0がある
+ 
+worker002にはcni0がない！
+ 
+Kubectl get nodeでworker002はrunningになっていたので仕事は振るはずです。
+CNIの残骸を削除して復旧する方が早いとのことでWorker002で以下をやってみます。
+sudo kubeadm reset -f
+sudo rm -rf /etc/cni/net.d /var/lib/cni /var/lib/kubelet /etc/kubernetes
+sudo ip link del cni0 2>/dev/null || true
+sudo ip link del flannel.1 2>/dev/null || true
+sudo systemctl restart containerd kubelet
+ 
+ip aで確認するとFunnel.1が消えている。
+ 
+その後 もう一度 join（最新の token/hash で）：
+sudo kubeadm join 192.168.100.5:6443 --token cy3ry0.ctc3262h4kk7nlya \
+        --discovery-token-ca-cert-hash sha256:86a094e9e46c88df2db6931eadadbaa34a76c205aa770dacaf05302ef35ca88b
+ 
+関野メモ＞※ token が分からなければ control-plane で
+kubeadm token create --print-join-command で再発行できるとのこと。でもこれをやったらworker001側もjoinし直す必要あり。
+Joinされたようです。
+Kubectl get nodeで確認します。Runningになっている。
+ 
+Runnningにはなっているが、まだ、Flannel.1はあるけどcni0がない。
+
+ 
+この場合は、
+flannel の VXLAN デバイスは作れてる（flanneld は動いてるっぽい）
+でも CNI plugin がブリッジ(cni0)を作れていない
+なので、原因はだいたい：
+/etc/cni/net.d が空 or 壊れてる
+以前の残骸で競合していて、kubelet が NetworkPluginNotReady のままとなっているケースが多いみたい。
+なので→ 「CNIだけ掃除→kubelet再起動→join」 が一番効きます。
+なぜ flannel.1 だけ先にできるのか？
+flannel.1 の正体
+ノード間通信用 VXLAN VTEP
+DaemonSet の flannel Pod が起動した時点で作られる
+
+Pod が1個も無くても作られる
+つまり：
+「このノードは Pod ネットワークに参加できる」という 準備完了インタフェース
+なぜ cni0 は後からできるの？
+cni0 の正体
+Pod を収容する Linux bridge「このノードに Pod が1つでも配置された瞬間」に作られる
+Kubernetes 的には：
+①	Node join
+②	flannel Pod 起動→ flannel.1 作成
+③	Scheduler が Pod をこの Node に割り当て
+④	kubelet が CNI を実行し、cni0 を作成
+⑤	veth pair を作って Pod を接続
+👉 Pod が来ない限り cni0 は不要なので作られません
+
+reset 直後に flannel.1 しか無かった理由は、これ👇が重要です。
+sudo kubeadm reset -f
+sudo rm -rf /etc/cni/net.d /var/lib/cni /var/lib/kubelet /etc/kubernetes
+sudo ip link del cni0
+sudo ip link del flannel.1
+
+
+
+その後：
+Joinをしたタイミングでflannel DaemonSet が再配布flannel Pod 起動
+まず flannel.1 が復活、まだ Pod が無い → cni0 不要 → 作られない
+nginx Pod が worker002 に来たのでcni0 & veth が作られる 
+💯 完璧な流れです。
+
+flannel.1：ノード参加時に即作成
+cni0：Pod が割り当てられた時に作成
+時間がかかっているように見えたのはScheduler が worker002 を使うタイミングが後だっただけです。
+以下をやってみてください。今回はworker001とworker002に分散されています。
+kubectl get pods -o wide
+ 
+kubectl delete pod　＜赤枠部分の消したいpod　name>　←このやり方でpodを消す
+kubectl delete pod nginx-555497c844-4fzf4
+ 
+Deleteされてもすぐに別のIPアドレスで立ち上がってきます。すごい！
+
+
+
+
+全体のながれ復習
+管理者がkubectlでcreateでpodをつくることを指示したり、YAMLファイル（kube-flannel.ymlなど）を使ってapi serverに指示を出すと、api serverはetcdに指示する。etcd はYAML形式で管理しているのではなくAPIオブジェクトに変換した結果を管理している。（よって、人間からはどのような指示になっているのかわからないので、GithubなどでちゃんとYAMLファイルを管理しておく必要があります。）
+Kubeletはhttpsで定期的にapi serverにアクセスし、kubelet→api server→etcdのながれでAPIオブジェクトを見てなにか変更が必要であれば、Podを作成したりする。
+あくまでもapi serverから指示が飛ぶのではなく、kubelet側からapi serverに問い合わせているイメージです。Workerノードに余計な穴あけをするとセキュリティ的に弱くなるのでそのような作りになっている。
+また、Podは10.244.x.xのようなアドレス体系になっているが、Kubenetesの各ノードはコントローラもワーカーFunnel.1というインターフェースをもっていて、ここでPod間の通信が可能。コントローラはpodがないので必要性がもうイマイチまだわかりませんが、Podを制御するのに使う。こんなイメージ
+ 
+
+また、Pod間はvxlan技術を使って通信している！
+Pod → cni0 → flannel.1 → VXLAN → flannel.1 → cni0 → Pod
+Podがどこにある？というかPodでつかわれているサブネットはどのVTEPに送ればいいかに
+ついてもkubeletがapi serverをwatchしてetcdから必要な情報をとってきている。このとき、kube-proxyがiptablesを書き換える役割を持っている。
+
+Podの中はだいたいコンテナは１つ（通常１つのサービスで１つのコンテナ）にする。ログを取得するようなコンテナを一緒に入れることもあるようです。このような構成をサイドカーというようです。
+また、NginxだけではWEBサーバとして成り立たないので、htmlのコンテンツを含んで１つのコンテナにするのが一般的のようですね。そのときにDockerのビルドでコンテナをつくる。
+ 
+2.2.22 コンテナの削除について考える
+現在はDeploymentで2個起動するというのをやってみます。
+kubectl create deployment nginx --image=nginx:1.24.0
+kubectl scale deployment nginx --replicas=2
+kubectl get pod -o wide
+現在はこの状態です。
+ 
+これは--replicas=2にしているため、この状態からkubectl delete pod nginx-xxxx-xxxx
+コマンドでDeleteしてもすぐに復活する。
+もとの状態に戻すには？--replicas=1にする。
+ 
+ではここで、1台を消すと？また1台復活する。
+ 
+実はKubenetesのデフォルトはreplicas=1になっています。つまり、1台いなくなったら自動的に立ち上げているんですね。
+
+
+今回起きていたことを正確に理解しましょう。
+あなたが Pod を kubectl delete pod ... で消した。
+ReplicaSet コントローラ が検知（関野メモ＞worker側のkubeletがwatchして検知するわけではない！）
+👉「あれ？ desired=1 なのに actual=0 だ」　（注１）
+ReplicaSet が 新しい Pod を作成
+scheduler が worker ノードを選択
+kubelet が「起動命令」を受けて Pod を立ち上げる
+👉 kubelet は監視者ではなく、実行担当
+関野メモ＞注1：「あれ？ desired=1 なのに actual=0 だ」と書いてありますが、この状態を人間が実際に見るのは難しい。desired=1 なのに actual=0 だというのはetcdのオブジェクト状態でわかるわけです。
+例えば、以下をやってみてください。Deploymentの設定や状態をgetできます。
+kubectl get deployment nginx -o yaml
+長いログがでますが、まず前半部分の中にspecというのがあってここにあるべき姿が記載されています。ここにreplicas=1とあります。これはdeploymentでpodを作るときのデフォルトです。これを２にするのがscaleコマンドでした。
+（例：kubectl scale deployment nginx --replicas=2　）
+2にすると常に2つのpodが立ち上がるようになります。1なら常に１つは立ちあがっているように動きます。すげー！
+
+ 
+次がstatusでここに現在の状態があります。
+ 
+コントローラはこのログを見ているわけではないが、ReplicaSet コントローラが、「spec.replicas（desired）」と「実在する Pod 数（actual）」の差分を検知しているようです。
+Specのところですが、2回specという言葉が登場しますが、1つ目はDeploymentについてのspecです。ここにreplicas=1などが記載されています。その下はのspecは実際に起動するpodのspecが記載されています。（nginxの1.24.0を動かすなど）
+
+ 
+つまり、create deploymentでpodを作るときは「Pod をどう作るか」ではなく
+「Pod をどう管理するか」まで定義しているんですね。
+ 
+2.2.23 マニュフェストについて
+Kubernetes APIに「望ましい状態」を宣言するためのYAMLファイル群を「マニフェスト」と呼びます。Kubectl create deploymentコマンドでもpodをつくることはできますが、もっとpodを立ち上げる時に柔軟な対応ができるようにするものです。マニフェスト（Manifest）とは、Kubernetes API に対して「このリソースは、こうあるべきだ」という状態を宣言した定義ファイルといえます。以下のようなコマンドでyamlファイルを指定できます。
+kubectl create -f	「最初に作る」
+kubectl apply -f		「この状態に合わせてね」
+kubectl delete -f	「この定義を消す」
+これまでやってきたコマンド配下でした。これは命令的な指示
+kubectl create deployment hello --image=nginx
+kubectl scale deployment hello --replicas=3
+マニュフェストを使う方法はあるべき姿を宣言する感じです。マニュフェストを修正するのが本来のやり方です。
+2.2.24 マニュフェストでpodを作ってみる。
+まず、コントローラで自分のデフォルトディレクトリーにhtml.yamlというマニュフェストを作成してください。以下のhtml.yamlについてはsekino-sanのところを自分の名前にしてください。
+このWEBサーバにアクセスすると以下のように表示されます。
+ 
+
+＊＊＊　html.yamlの内容　ここから　＊＊＊
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hello-html
+data:
+  index.html: |
+    <!doctype html>
+    <html>
+      <head><meta charset="utf-8"><title>Hello</title></head>
+      <body>
+        <h1>hello sekino-san!</h1>　#←sekinoの部分を自分の名前に変更する
+        <p>私は pod の <b id="p"></b> です。</p>
+        <script>
+          // Pod名(=hostname)をブラウザ側で取得して表示する
+          fetch('/hostname').then(r => r.text()).then(t => {
+            document.getElementById('p').textContent = t.trim();
+          });
+        </script>
+      </body>
+    </html>
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-nginx
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: hello-nginx
+  template:
+    metadata:
+      labels:
+        app: hello-nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:stable
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: html
+          mountPath: /usr/share/nginx/html/index.html
+          subPath: index.html
+        # /hostname で Pod名を返す簡易エンドポイントを追加
+        command: ["/bin/sh","-c"]
+        args:
+          - |
+            cat >/etc/nginx/conf.d/default.conf <<'EOF'
+            server {
+              listen 80;
+              location / { root /usr/share/nginx/html; index index.html; }
+              location = /hostname { return 200 "$hostname\n"; }
+            }
+            EOF
+            nginx -g 'daemon off;'
+      volumes:
+      - name: html
+        configMap:
+          name: hello-html
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-svc
+spec:
+  selector:
+    app: hello-nginx
+  ports:
+  - port: 80
+    targetPort: 80
+  type: ClusterIP
+＊＊＊　html.yaml　ここまで＊＊＊
+以下のコマンドで今、作成したマニュフェストを適応して動かします。
+kubectl get deploy,svc,pod　でkubenetesのserivceだけが動いている状態を確認します。Podもありません。
+ 
+次に以下をやります。
+kubectl apply -f hello.yaml
+kubectl get deploy,pod,svc
+ 
+まず、deploymentのところを見るとUp-to-dateが３ですが、Availableが0です。今起動したばかりなのでこうなります。up-to-dateはあるべき姿が３つのpodですね。Podを見るとcontainerCreatingという状態になっています。作成中ですね。また、hello-svcというserviceができています。もう一度、コマンドを入れるとready状態になっていることがわかります。
+ 
+Podができたら、nodeportを作成して自分のPCからアクセスしてみてください。
+kubectl expose deploy hello-nginx --name hello-nodeport --type NodePort --port 80
+kubectl get svc hello-nodeport
+ 
+上記の場合はポートが30570とわかるので、コントローラまたはworkerのIPアドレス：30570で自分のブラウザからアクセスしてみてください。
+※下記は自宅でやっているのでコントローラIPアドレスが192.168.3.231になっています。
+ 
+アドレスをworker001のアドレスにしたら応答するノードが変わりました。
+ 
+アドレスをworker002のアドレスにしたらまた応答するノードが変わりました。
+ 
+このようにNodeportは外部からpodに入るときに必要なサービスになります。
+ここで、html.yamlを一行一行みていきましょう。
+1つ目のブロックはConfigMAPになります。
+行	記述	意味
+1	apiVersion: v1	KubernetesのAPIバージョン（ConfigMapはv1）
+2	kind: ConfigMap	種別が ConfigMap（設定やファイル片を持てる）
+3	metadata:	メタ情報（名前など）の開始
+4	name: hello-html	ConfigMapの名前（後でVolumeで参照）
+5	data:	ConfigMapの中身（キー＝ファイル名っぽいもの）
+6	` index.html:	`
+7	<!doctype html>	HTMLの先頭（ブラウザ向け）
+8	<html>	HTML開始
+9	<head><meta charset="utf-8"><title>Hello</title></head>	文字コードUTF-8、タイトルHello
+10	<body>	body開始
+11	<h1>hello sekino-san!</h1>　#←...	見出し表示（ここを自分の名前に変える）※ # はHTMLではなく“説明コメント”として見なすのが安全
+12	<p>私は pod の <b id="p"></b> です。</p>	id="p" の場所にPod名を埋め込む予定
+13	<script>	JavaScript開始
+14	// Pod名...	JSコメント（Pod名を取得して表示する説明）
+15	fetch('/hostname').then(r => r.text()).then(t => {	ブラウザから /hostname にHTTPアクセスしてテキスト取得
+16	document.getElementById('p').textContent = t.trim();	取得した文字列を id="p" の要素に表示（前後空白除去）
+17	});	thenブロック終了
+18	</script>	JavaScript終了
+19	</body>	body終了
+20	</html>	HTML終了
+２つ目のブロックはDeploymentになります。
+行	記述	意味
+1	---	ここから別リソース（区切り）
+2	apiVersion: apps/v1	Deploymentは apps/v1
+3	kind: Deployment	種別が Deployment（Podを望ましい数に保つ）
+4	metadata:	メタ情報開始
+5	name: hello-nginx	Deployment名
+6	spec:	設定本体
+7	replicas: 3	Podを3個に保つ（落ちたら自動で補充）
+8	selector:	「このDeploymentが管理するPodの見分け方」
+9	matchLabels:	ラベル一致で選ぶ
+10	app: hello-nginx	app=hello-nginx のPodを管理対象にする
+11	template:	これから作るPodの“雛形”
+12	metadata:	Pod側メタ情報
+13	labels:	Podに付けるラベル
+14	app: hello-nginx	Podに app=hello-nginx を付ける（selectorと一致させる）
+15	spec:	Podの中身（コンテナ等）
+16	containers:	コンテナ配列
+17	- name: nginx	コンテナ名 nginx
+18	image: nginx:stable	nginx公式イメージ stable タグ
+19	ports:	コンテナが使うポート宣言（主に情報/連携用）
+20	- containerPort: 80	コンテナ内80番で待ち受け
+21	volumeMounts:	Volumeをコンテナ内にマウントする設定
+22	- name: html	Volume名 html を使う
+23	mountPath: /usr/share/nginx/html/index.html	コンテナ内のこのパスに配置する
+24	subPath: index.html	Volume全体ではなく、キーindex.htmlだけをこの1ファイルとして差し込む
+25	# /hostname ...	YAMLコメント（説明）
+26	command: ["/bin/sh","-c"]	コンテナ起動時コマンドをシェルで実行するよう上書き
+27	args:	sh -c に渡すスクリプト本体
+28	` -	`
+29	cat >/etc/nginx/conf.d/default.conf <<'EOF'	nginxの設定ファイルをヒアドキュメントで生成
+30	server {	nginx serverブロック開始
+31	listen 80;	80で待ち受け
+32	location / { root ...; index index.html; }	/ はさっきの index.html を返す
+33	location = /hostname { return 200 "$hostname\n"; }	/hostname だけはPodのホスト名（=Pod名）を返す
+34	}	serverブロック終了
+35	EOF	ヒアドキュメント終了
+36	nginx -g 'daemon off;'	nginxをフォアグラウンドで起動（コンテナがすぐ死なないように）
+37	volumes:	Podに用意するVolume
+38	- name: html	Volume名 html
+39	configMap:	Volumeの中身はConfigMap由来
+40	name: hello-html	参照するConfigMap名（上で作ったやつ）
+3つ目はserviceの定義
+行	記述	意味
+1	---	ここから別リソース（区切り）
+2	apiVersion: v1	Serviceはv1
+3	kind: Service	種別が Service（Podへの入口）
+4	metadata:	メタ情報開始
+5	name: hello-svc	Service名
+6	spec:	設定本体
+7	selector:	どのPodに流すか（ラベルで選ぶ）
+8	app: hello-nginx	app=hello-nginx のPodへ流す
+9	ports:	Serviceポート設定
+10	- port: 80	Serviceの受け口は80
+11	targetPort: 80	Pod側（コンテナ）の80へ転送
+12	type: ClusterIP	クラスタ内部だけで使える仮想IP（外からは直接不可）
+
+
+
+
+2.2.25 Kubectlでpodのログをみる
+
+
+
+2.3 AWS　EKSでの実装について
+この資料ではproxmox内に3台のubuntuを立てて、その中でKubernetesを構築しているのでAWS　EKS（Amazon Elastic Kubernetes Service）とは大きく環境が異なります。基本的なKubernetesの動きは自分の環境でも確認することができますが、自分の環境だけでは現実の世界（EKSで実現する世界）がわかりません。この章ではそのあたりを解説していきたいです。
+その前に一般的はWEBサーバの構成を復習しましょう。汚い図ですみません！
+
+
+
+
+
+
+つまり、リアルサーバを立てたら、そのリアルサーバのIPをLBに登録しますよね？
+しかし、皆さんの環境ではこのリアルサーバの内部にPodがあるのでLBから直接は到達できません。当然、このリアルサーバをEC2で立てても内部の10.244.x.xにはアクセスできません。しかし、AWSのEKS（Amazon Elastic Kubernetes Service）ではALBから直接、Podにアクセスできるそうです。各ノードでは10.244.1.0とか10.244.2.0とpodのCIDRが分かれるようになっているのでそのような構成が取れるんです。
+2.3.1 Ingressという考えかた
+AWS EKS環境には以下のコマンドがあります。（実際にはやったことないです！）
+kubectl get ingress
+するとこのような情報がでてきます。
+ 
+HOSTSのところのwww.example.comはこれを利用するユーザが指定したWEBサーバのURLです。一般ユーザはここにアクセスしてくるものとします。このURLに対して通常はRoute53でAレコードを定義します。Elastic-IPを取得してそれと紐づける。と考えるのが普通ですが、EKSは違います。Alias（エリアス）レコードを自動的に登録します。これが上記のADDRESSのところに記載されているURLです。EKS側にwww.example.comを登録すればエリアスの登録も自動に登録されるようです。
+www.example.com → k8s-xxxx.elb.amazonaws.com はAWS EKS + ALB Ingress 環境でのみ現れる表示で、Elastic IP ではなく ALB の DNS 名になります。
+よって、皆さんが作成してきた自前 Kubernetes 環境ではIngress も ALB も存在しないのが正しい状態です。
+実際の流れ（AWS EKS + ALB の場合）
+ユーザ（ブラウザ）
+  ↓ https://www.example.com
+DNS
+  ↓
+ALB の DNS 名（k8s-xxxx.elb.amazonaws.com）
+  ↓
+ALB（L7）
+  ↓
+Pod（nginx など）
+
+それぞれ何をしているかを記載します。
+①ユーザ
+www.example.com にしかアクセスしない。AWS も Kubernetes も意識しない
+② DNS（例：Amazon Route 53）
+www.example.com
+→ k8s-xxxx.ap-northeast-1.elb.amazonaws.com
+ここは CNAME / Alias で設定される
+③ALB（Application Load Balancer）
+HTTPS 終端（TLS）、Host / Path でルーティング
+Ingress のルールを実装
+④Kubernetes（裏側）
+Ingress → Service → EndpointSlice、この流れでReady な Pod だけに転送
+Pod の増減は 完全自動追従
+
+超重要ポイント（ここが本質）
+ユーザが知っているのは
+www.example.com だけ
+Pod IP ❌も意識しない
+Service IP ❌も意識しない
+Node IP ❌も意識しない
+ALB の実 IP ❌も意識しない
+👉 すべて隠蔽されている
+
+あなたの今の環境との対比。皆さんの環境で外部からpodにアクセスしようとするならNodePortなどのサービス設定が必要です。
+環境	ユーザの入口
+自前 Kubernetes	NodeIP:NodePort　
+EKS + ALB	www.example.com
+
+まとめ：Route 53 ではwww.example.com の向き先に固定 IP ではなく
+k8s-xxxx.elb.amazonaws.com のような“ALB の DNS 名”を指定するのが一般的
+ 
+2.4 youtube動画の解説
+学習をする上では様々なコンテンツを見た方がいいです。例えば動画であればこれ
+Kubernetes Tutorial for Beginners [FULL COURSE in 4 Hours] - YouTube
+Techword with Nana（登録者数139万人！）アニメーションがわかりやすくハンズオンの操作も非常に見やすいです。
+コマンド操作の部分
+Kubectl create deplomentの説明　46:00
+Replicaset　49:13
+DeploymentもreplicaもpodもKubenetesがやってくれるのであなたは何もやる必要はありません。　50:19
+このあとに、deploymentのコンフィグをeditで修正してnginxのバージョンを1.16に変更すると自動的に新しい1.16のpodが生成させるというのをやっています。52:09
+kubectl logs pod名
+以下のように３つのpodで同時にログをとる。
+Linuxでログファイルをtailコマンドで出力するのと同じものが-fです
+tail -f /var/log/nginx/access.log　と同じ
+これを３つのpodで同時にやって、ブラウザで192.168.3.231:30576をやる。どこかにログがでるはず。ブラウザにはpodのIDがでるので、それでわかる。
+
+
+
+  
+ 
+たしかにこのpodにアクセスがきています！
+ 
+
